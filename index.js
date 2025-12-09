@@ -1,11 +1,11 @@
 export default {
   async fetch(request, env, ctx) {
-    const TARGET_ORIGIN = "https://mprod-cdn.toffeelive.com";
-    
-    // The specific cookie value you provided
-    const COOKIE_VALUE = "Edge-Cache-Cookie=URLPrefix=aHR0cHM6Ly9tcHJvZC1jZG4udG9mZmVlbGl2ZS5jb20:Expires=1765343156:KeyName=prod_live_events:Signature=KiDF2PUXpjdXgjOPuItWPR2lEXrCF52PIBFqOohWBeBiNZsf-itP6XQrM1xRiisi8_gOsu4TJVQeCOcRJv1eDw";
+    // Configuration
+    const STREAM_URL = "https://mprod-cdn.toffeelive.com/live/match-asiacup-2/index.m3u8";
+    const REFERER_URL = "https://toffeelive.com/";
+    const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-    // Handle CORS (so it plays on GitHub Pages or Localhost)
+    // 1. Handle CORS (for playing in browser/Github Pages)
     if (request.method === "OPTIONS") {
       return new Response(null, {
         headers: {
@@ -16,46 +16,61 @@ export default {
       });
     }
 
-    const url = new URL(request.url);
-    const targetUrl = `${TARGET_ORIGIN}${url.pathname}${url.search}`;
-
-    // Create headers that mimic a real browser visiting ToffeeLive
-    const newHeaders = new Headers();
-    
-    // CRITICAL: The Cookie must be set exactly like this
-    newHeaders.set("Cookie", COOKIE_VALUE);
-    
-    // CRITICAL: Spoof the User-Agent (Toffee blocks generic worker agents)
-    newHeaders.set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
-    
-    // CRITICAL: Spoof the Referer
-    newHeaders.set("Referer", "https://toffeelive.com/");
-    newHeaders.set("Origin", "https://toffeelive.com");
-    newHeaders.set("Accept", "*/*");
-    newHeaders.set("Connection", "keep-alive");
-
     try {
-      const response = await fetch(targetUrl, {
-        method: request.method,
-        headers: newHeaders,
-        redirect: "follow"
+      // 2. Step 1: "Log in" / Get the Cookie
+      // We make a HEAD request to the main site or a known video page to trigger the Set-Cookie header
+      const authResponse = await fetch("https://toffeelive.com/", {
+        method: "HEAD", // HEAD is faster, we only need headers
+        headers: {
+          "User-Agent": USER_AGENT,
+          "Referer": "https://google.com" // Look like a Google search visitor
+        }
       });
 
-      // Clone the response to modify headers
-      const newResponse = new Response(response.body, response);
+      // Extract the cookie string from the "Set-Cookie" header
+      let cookie = authResponse.headers.get("set-cookie");
+      
+      // Fallback: If the main page doesn't set it, sometimes we must hit a specific API or use a hardcoded fallback
+      // Note: If Toffee requires an OTP login, this auto-fetch will fail and you MUST use a hardcoded cookie.
+      if (!cookie) {
+        // Option: Insert a backup cookie here if you have one, or throw error
+        // cookie = "Edge-Cache-Cookie=..." 
+        throw new Error("Could not auto-generate cookie from ToffeeLive.");
+      }
 
-      // Add CORS headers to the RESPONSE so your browser accepts it
+      // 3. Step 2: Fetch the Stream using the new Cookie
+      // Construct the URL. If the user requests a .ts segment, we pass that through.
+      const url = new URL(request.url);
+      
+      // If the request is for the main m3u8, use the hardcoded stream URL
+      // If the request is for a segment (path doesn't end in /), append the path to the origin
+      let targetUrl = STREAM_URL;
+      
+      // Logic to handle segments (ts files) if the player requests them relative to your worker
+      if (url.pathname !== "/" && url.pathname.includes(".ts")) {
+         targetUrl = `https://mprod-cdn.toffeelive.com${url.pathname}`;
+      }
+
+      const streamHeaders = new Headers();
+      streamHeaders.set("Cookie", cookie); // The fresh cookie we just got
+      streamHeaders.set("User-Agent", USER_AGENT);
+      streamHeaders.set("Referer", REFERER_URL);
+      streamHeaders.set("Origin", "https://toffeelive.com");
+
+      const response = await fetch(targetUrl, {
+        method: request.method,
+        headers: streamHeaders
+      });
+
+      // 4. Return the video to the user
+      const newResponse = new Response(response.body, response);
       newResponse.headers.set("Access-Control-Allow-Origin", "*");
       newResponse.headers.set("Access-Control-Expose-Headers", "*");
-      
-      // Remove security headers that might block embedding
-      newResponse.headers.delete("X-Frame-Options");
-      newResponse.headers.delete("Content-Security-Policy");
 
       return newResponse;
 
     } catch (e) {
-      return new Response(JSON.stringify({ error: e.message }), { status: 500 });
+      return new Response(`Proxy Error: ${e.message}`, { status: 500 });
     }
   },
 };
