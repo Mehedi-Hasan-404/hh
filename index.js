@@ -1,11 +1,32 @@
-export default {
-  async fetch(request, env, ctx) {
-    // Configuration
-    const STREAM_URL = "https://mprod-cdn.toffeelive.com/live/match-asiacup-2/index.m3u8";
-    const REFERER_URL = "https://toffeelive.com/";
-    const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+// index.js
 
-    // 1. Handle CORS (for playing in browser/Github Pages)
+/**
+ * Cloudflare Worker HLS Proxy
+ * Fetches the stream by dynamically mapping the request path to the target origin.
+ * Designed to handle all HLS files (.m3u8 and .ts segments).
+ */
+
+export default {
+  async fetch(request) {
+    // --- Configuration ---
+    const TARGET_ORIGIN = "https://mprod-cdn.toffeelive.com";
+    
+    // NOTE: Replace this with the most current Edge-Cache-Cookie value.
+    // This value is the one that was confirmed working previously.
+    const AUTH_COOKIE = "Edge-Cache-Cookie=URLPrefix=aHR0cHM6Ly9tcHJvZC1jZG4udG9mZmVlbGl2ZS5jb20:Expires=1765343156:KeyName=prod_live_events:Signature=KiDF2PUXpjdXgjOPuItWPR2lEXrCF52PIBFpohWBeBiNZsf-itP6XQrM1xRiisi8_gOsu4TJVQeCOcRJv1eDw";
+    
+    // Spoofed Headers (Essential for bypassing CDN checks)
+    const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+    const REFERER_URL = "https://toffeelive.com/";
+    // ---------------------
+
+    const url = new URL(request.url);
+    
+    // Dynamically map the worker path (e.g., /live/match-asiacup-2/index.m3u8) 
+    // to the target origin path.
+    const targetUrl = `${TARGET_ORIGIN}${url.pathname}${url.search}`;
+
+    // 1. Handle CORS Preflight Requests (OPTIONS)
     if (request.method === "OPTIONS") {
       return new Response(null, {
         headers: {
@@ -17,60 +38,59 @@ export default {
     }
 
     try {
-      // 2. Step 1: "Log in" / Get the Cookie
-      // We make a HEAD request to the main site or a known video page to trigger the Set-Cookie header
-      const authResponse = await fetch("https://toffeelive.com/", {
-        method: "HEAD", // HEAD is faster, we only need headers
-        headers: {
-          "User-Agent": USER_AGENT,
-          "Referer": "https://google.com" // Look like a Google search visitor
-        }
-      });
-
-      // Extract the cookie string from the "Set-Cookie" header
-      let cookie = authResponse.headers.get("set-cookie");
+      // 2. Create the Upstream Request with spoofed headers
+      const newHeaders = new Headers(request.headers);
       
-      // Fallback: If the main page doesn't set it, sometimes we must hit a specific API or use a hardcoded fallback
-      // Note: If Toffee requires an OTP login, this auto-fetch will fail and you MUST use a hardcoded cookie.
-      if (!cookie) {
-        // Option: Insert a backup cookie here if you have one, or throw error
-        // cookie = "Edge-Cache-Cookie=..." 
-        throw new Error("Could not auto-generate cookie from ToffeeLive.");
-      }
-
-      // 3. Step 2: Fetch the Stream using the new Cookie
-      // Construct the URL. If the user requests a .ts segment, we pass that through.
-      const url = new URL(request.url);
+      // Override browser headers with required spoofed values
+      newHeaders.set("Cookie", AUTH_COOKIE);
+      newHeaders.set("User-Agent", USER_AGENT);
+      newHeaders.set("Referer", REFERER_URL);
+      newHeaders.set("Origin", "https://toffeelive.com");
+      newHeaders.set("Accept", "*/*");
+      newHeaders.set("Connection", "keep-alive");
       
-      // If the request is for the main m3u8, use the hardcoded stream URL
-      // If the request is for a segment (path doesn't end in /), append the path to the origin
-      let targetUrl = STREAM_URL;
-      
-      // Logic to handle segments (ts files) if the player requests them relative to your worker
-      if (url.pathname !== "/" && url.pathname.includes(".ts")) {
-         targetUrl = `https://mprod-cdn.toffeelive.com${url.pathname}`;
-      }
-
-      const streamHeaders = new Headers();
-      streamHeaders.set("Cookie", cookie); // The fresh cookie we just got
-      streamHeaders.set("User-Agent", USER_AGENT);
-      streamHeaders.set("Referer", REFERER_URL);
-      streamHeaders.set("Origin", "https://toffeelive.com");
+      // Remove any potentially problematic security headers from the client request
+      newHeaders.delete("X-Forwarded-For");
 
       const response = await fetch(targetUrl, {
         method: request.method,
-        headers: streamHeaders
+        headers: newHeaders,
+        redirect: "follow",
       });
 
-      // 4. Return the video to the user
+      // 3. Clone the response to modify headers for browser playback
       const newResponse = new Response(response.body, response);
+
+      // Add CORS headers (essential)
       newResponse.headers.set("Access-Control-Allow-Origin", "*");
       newResponse.headers.set("Access-Control-Expose-Headers", "*");
+      
+      // Clean up security headers that might block embedding
+      newResponse.headers.delete("X-Frame-Options");
+      newResponse.headers.delete("Content-Security-Policy");
+      
+      // If the content is an m3u8 playlist, we may need to ensure 
+      // the base URL is pointing back to the worker for segment resolution.
+      if (response.headers.get("Content-Type")?.includes("application/vnd.apple.mpegurl")) {
+          // If the playlist has absolute URLs, the browser will request them directly, 
+          // bypassing the worker. This substitution ensures all future requests come back.
+          const playlistContent = await response.text();
+          const workerUrlBase = `https://${url.host}`; // e.g., https://my-worker.workers.dev
+          
+          // Replace all instances of the origin domain with the worker's domain
+          const proxiedContent = playlistContent.replace(
+              new RegExp(TARGET_ORIGIN.replace(/https?:\/\//, ''), 'g'), 
+              url.host
+          );
+          
+          return new Response(proxiedContent, newResponse);
+      }
 
       return newResponse;
 
     } catch (e) {
-      return new Response(`Proxy Error: ${e.message}`, { status: 500 });
+      // Catch any network or DNS errors (like 1016)
+      return new Response(`Proxy Error: Failed to fetch from origin. Error: ${e.message}`, { status: 500 });
     }
   },
 };
