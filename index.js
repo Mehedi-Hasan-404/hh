@@ -1,48 +1,79 @@
-addEventListener("fetch", event => {
-  event.respondWith(handle(event.request));
-});
+export default {
+  async fetch(request) {
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        headers: cors(),
+      });
+    }
 
-async function handle(request) {
-  const url = new URL(request.url);
+    const url = new URL(request.url);
+    const target = url.searchParams.get("url");
+    const referer = url.searchParams.get("referer") || "";
 
-  // Target upstream HLS URL we want to proxy
-  // You can pass id & referer as query params
-  const upstream = url.searchParams.get("url");
-  if (!upstream) {
-    return new Response("Missing ?url=...", { status: 400 });
-  }
+    if (!target) {
+      return new Response("Missing ?url", { status: 400 });
+    }
 
-  // Fetch upstream
-  const init = {
-    method: request.method,
-    headers: {
-      // send referer if provided
-      referer: url.searchParams.get("referer") || "",
-      "user-agent": request.headers.get("user-agent"),
-    },
-  };
+    const upstream = await fetch(target, {
+      headers: {
+        "User-Agent": request.headers.get("User-Agent") || "Mozilla/5.0",
+        "Referer": referer,
+        "Origin": referer ? new URL(referer).origin : "",
+      },
+    });
 
-  const res = await fetch(upstream, init);
+    const headers = new Headers(upstream.headers);
+    headers.set("Access-Control-Allow-Origin", "*");
+    headers.set("Access-Control-Allow-Headers", "*");
+    headers.set("Access-Control-Allow-Methods", "GET,HEAD,OPTIONS");
 
-  // Clone response so we can modify headers
-  const headers = new Headers(res.headers);
+    // 🧠 If it's an m3u8 → rewrite it
+    if (target.includes(".m3u8")) {
+      let text = await upstream.text();
 
-  // Always allow CORS
-  headers.set("Access-Control-Allow-Origin", "*");
-  headers.set("Access-Control-Allow-Methods", "GET,HEAD,OPTIONS");
-  headers.set("Access-Control-Allow-Headers", "*");
+      const base = target.substring(0, target.lastIndexOf("/") + 1);
 
-  // Fix content types
-  if (upstream.endsWith(".m3u8")) {
-    headers.set("Content-Type", "application/vnd.apple.mpegurl");
-  }
+      text = text
+        .split("\n")
+        .map(line => {
+          if (
+            line.startsWith("#") ||
+            line.trim() === ""
+          ) return line;
 
-  if (upstream.match(/\.(ts|aac|mp4)$/)) {
+          // absolute or relative segment URL
+          const absolute = line.startsWith("http")
+            ? line
+            : base + line;
+
+          return `${url.origin}/?url=${encodeURIComponent(
+            absolute
+          )}&referer=${encodeURIComponent(referer)}`;
+        })
+        .join("\n");
+
+      headers.set("Content-Type", "application/vnd.apple.mpegurl");
+
+      return new Response(text, {
+        status: 200,
+        headers,
+      });
+    }
+
+    // 🎥 TS / media segments
     headers.set("Content-Type", "video/MP2T");
-  }
 
-  return new Response(res.body, {
-    status: res.status,
-    headers,
-  });
-}
+    return new Response(upstream.body, {
+      status: upstream.status,
+      headers,
+    });
+  },
+};
+
+function cors() {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "*",
+    "Access-Control-Allow-Methods": "GET,HEAD,OPTIONS",
+  };
+                }
