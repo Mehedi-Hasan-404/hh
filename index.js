@@ -1,79 +1,70 @@
 export default {
   async fetch(request) {
-    if (request.method === "OPTIONS") {
-      return new Response(null, {
-        headers: cors(),
-      });
-    }
+    const ORIGIN_PLAYLIST =
+      "http://kstv.us:8080/live/carloskiu/4461542986/15965.m3u8";
 
-    const url = new URL(request.url);
-    const target = url.searchParams.get("url");
-    const referer = url.searchParams.get("referer") || "";
+    const DVR_WINDOW_SECONDS = 300; // 5 minutes
 
-    if (!target) {
-      return new Response("Missing ?url", { status: 400 });
-    }
-
-    const upstream = await fetch(target, {
+    const response = await fetch(ORIGIN_PLAYLIST, {
       headers: {
-        "User-Agent": request.headers.get("User-Agent") || "Mozilla/5.0",
-        "Referer": referer,
-        "Origin": referer ? new URL(referer).origin : "",
+        "User-Agent": "Mozilla/5.0",
       },
     });
 
-    const headers = new Headers(upstream.headers);
-    headers.set("Access-Control-Allow-Origin", "*");
-    headers.set("Access-Control-Allow-Headers", "*");
-    headers.set("Access-Control-Allow-Methods", "GET,HEAD,OPTIONS");
+    let playlist = await response.text();
+    const lines = playlist.split("\n");
 
-    // 🧠 If it's an m3u8 → rewrite it
-    if (target.includes(".m3u8")) {
-      let text = await upstream.text();
+    let segments = [];
+    let currentDuration = 0;
 
-      const base = target.substring(0, target.lastIndexOf("/") + 1);
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].startsWith("#EXTINF")) {
+        const duration = parseFloat(lines[i].split(":")[1]);
+        const uri = lines[i + 1];
 
-      text = text
-        .split("\n")
-        .map(line => {
-          if (
-            line.startsWith("#") ||
-            line.trim() === ""
-          ) return line;
+        segments.push({
+          duration,
+          inf: lines[i],
+          uri,
+        });
 
-          // absolute or relative segment URL
-          const absolute = line.startsWith("http")
-            ? line
-            : base + line;
-
-          return `${url.origin}/?url=${encodeURIComponent(
-            absolute
-          )}&referer=${encodeURIComponent(referer)}`;
-        })
-        .join("\n");
-
-      headers.set("Content-Type", "application/vnd.apple.mpegurl");
-
-      return new Response(text, {
-        status: 200,
-        headers,
-      });
+        currentDuration += duration;
+      }
     }
 
-    // 🎥 TS / media segments
-    headers.set("Content-Type", "video/MP2T");
+    // Keep only last 5 minutes
+    let rolling = [];
+    let rollingDuration = 0;
 
-    return new Response(upstream.body, {
-      status: upstream.status,
-      headers,
+    for (let i = segments.length - 1; i >= 0; i--) {
+      rolling.unshift(segments[i]);
+      rollingDuration += segments[i].duration;
+
+      if (rollingDuration >= DVR_WINDOW_SECONDS) break;
+    }
+
+    // Calculate media sequence
+    const mediaSequence = segments.length - rolling.length;
+
+    // Build new playlist
+    let output = [
+      "#EXTM3U",
+      "#EXT-X-VERSION:3",
+      "#EXT-X-TARGETDURATION:10",
+      "#EXT-X-MEDIA-SEQUENCE:" + mediaSequence,
+    ];
+
+    for (const seg of rolling) {
+      output.push(seg.inf);
+      output.push(seg.uri);
+    }
+
+    return new Response(output.join("\n"), {
+      headers: {
+        "Content-Type": "application/vnd.apple.mpegurl",
+        "Cache-Control": "no-cache",
+        "Access-Control-Allow-Origin": "*",
+      },
     });
   },
 };
-
-function cors() {
-  return {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "*",
-    "Access-Control-Allow-Methods": "GET,HEAD,OPTIONS",
-  };
-                }
