@@ -1,11 +1,10 @@
-const ORIGIN_BASE =
-  "http://kstv.us:8080/live/carloskiu/4461542986/";
-const PLAYLIST = ORIGIN_BASE + "15965.m3u8";
+const ENTRY_PLAYLIST =
+  "http://kstv.us:8080/live/carloskiu/4461542986/15965.m3u8";
 
 const DVR_SECONDS = 300; // 5 minutes
 
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request) {
     const url = new URL(request.url);
 
     // =========================
@@ -18,10 +17,8 @@ export default {
       }
 
       const segRes = await fetch(target, {
+        redirect: "follow",
         cf: { cacheTtl: 0 },
-        headers: {
-          "User-Agent": "Mozilla/5.0",
-        },
       });
 
       return new Response(segRes.body, {
@@ -37,12 +34,17 @@ export default {
     // =========================
     // PLAYLIST HANDLER
     // =========================
-    const res = await fetch(PLAYLIST, {
+    const res = await fetch(ENTRY_PLAYLIST, {
+      redirect: "follow",
       cf: { cacheTtl: 0 },
-      headers: {
-        "User-Agent": "Mozilla/5.0",
-      },
     });
+
+    // 🔑 THIS IS THE KEY PART
+    const finalPlaylistURL = res.url;
+    const baseURL = finalPlaylistURL.substring(
+      0,
+      finalPlaylistURL.lastIndexOf("/") + 1
+    );
 
     const text = await res.text();
     const lines = text.split("\n");
@@ -54,19 +56,16 @@ export default {
         const duration = parseFloat(lines[i].split(":")[1]);
         let uri = lines[i + 1];
 
+        // Resolve against FINAL redirected base
         if (!uri.startsWith("http")) {
-          uri = ORIGIN_BASE + uri;
+          uri = baseURL + uri;
         }
 
-        segments.push({
-          duration,
-          inf: lines[i],
-          uri,
-        });
+        segments.push({ duration, inf: lines[i], uri });
       }
     }
 
-    // Rolling 5-minute buffer
+    // Rolling 5-minute window
     let buffer = [];
     let total = 0;
 
