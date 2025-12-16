@@ -1,82 +1,62 @@
-const ENTRY_PLAYLIST =
-  "https://lor.us-east-1.amazonaws.com/v1/manifest/85b2e189604a6043ef957e7a3e6ed3bf9b11c843/USCA_DAI_STRM6/117c2abf-8f3d-498e-9531-dbd5aaa0a519/1.m3u8";
+const axios = require('axios');
+const { HttpsProxyAgent } = require('https-proxy-agent');
 
-export default {
-  async fetch(request) {
-    const url = new URL(request.url);
+// --- Your Configuration ---
+const PROXY_IP = '142.111.48.253';
+const PROXY_PORT = '7030';
+const PROXY_USERNAME = 'iuookxfv';
+const PROXY_PASSWORD = '34bkqfesh5hp';
+const STREAM_URL = 'https://lor.us-east-1.amazonaws.com/v1/manifest/85b2e189604a6043ef957e7a3e6ed3bf9b11c843/USCA_DAI_STRM6/117c2abf-8f3d-498e-9531-dbd5aaa0a519/1.m3u8';
+// --------------------------
 
-    // ============================
-    // SEGMENT / KEY / SUBPLAYLIST PROXY
-    // ============================
-    if (url.pathname === "/p") {
-      const target = url.searchParams.get("u");
-      if (!target) {
-        return new Response("Missing target", { status: 400 });
-      }
+// 1. Construct the Proxy URL
+const proxyUrl = `http://${PROXY_USERNAME}:${PROXY_PASSWORD}@${PROXY_IP}:${PROXY_PORT}`;
 
-      const res = await fetch(target, {
-        redirect: "follow",
-        cf: {
-          cacheTtl: 0,
-          // Force US edge
-          colocation: "us",
-        },
-      });
+// 2. Create the Proxy Agent
+// This agent tells axios to route the request through your proxy
+const agent = new HttpsProxyAgent(proxyUrl);
 
-      const headers = new Headers(res.headers);
-      headers.set("Access-Control-Allow-Origin", "*");
-      headers.set("Cache-Control", "no-store");
+/**
+ * Fetches the streaming manifest using the authenticated proxy.
+ */
+async function fetchStreamManifest() {
+    console.log(`Attempting to fetch manifest via proxy: ${PROXY_IP}:${PROXY_PORT}`);
+    
+    try {
+        const response = await axios.get(STREAM_URL, {
+            // Use the proxy agent for this request
+            httpsAgent: agent,
+            // Set a User-Agent to mimic a browser, which can help with some servers
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            },
+            // Set a timeout in case the proxy or target server is slow
+            timeout: 15000 
+        });
 
-      return new Response(res.body, {
-        status: res.status,
-        headers,
-      });
+        console.log('--- Successfully Fetched Manifest ---');
+        console.log(`Status Code: ${response.status}`);
+        
+        // Output the content of the M3U8 file
+        console.log('\nManifest Content:\n');
+        console.log(response.data);
+        console.log('\n-------------------------------------');
+
+    } catch (error) {
+        // Handle errors (e.g., proxy authentication failure, network error, stream not found)
+        console.error('--- ERROR FETCHING STREAM ---');
+        if (error.response) {
+            // The server responded with a status code outside the 2xx range
+            console.error(`Status: ${error.response.status}`);
+            console.error(`Data: ${error.response.data.substring(0, 200)}...`);
+        } else if (error.request) {
+            // The request was made but no response was received (e.g., proxy/network failure)
+            console.error('No response received from proxy or target server.');
+        } else {
+            // Something else went wrong
+            console.error('Axios Error:', error.message);
+        }
     }
+}
 
-    // ============================
-    // PLAYLIST HANDLER
-    // ============================
-    const res = await fetch(ENTRY_PLAYLIST, {
-      redirect: "follow",
-      cf: {
-        cacheTtl: 0,
-        colocation: "us",
-      },
-    });
-
-    const finalURL = res.url;
-    const baseURL =
-      finalURL.substring(0, finalURL.lastIndexOf("/") + 1);
-
-    const text = await res.text();
-    const lines = text.split("\n");
-
-    let out = [];
-
-    for (const line of lines) {
-      if (
-        line.startsWith("#") ||
-        line.trim() === ""
-      ) {
-        out.push(line);
-      } else {
-        // Resolve relative URLs
-        const abs = line.startsWith("http")
-          ? line
-          : baseURL + line;
-
-        out.push(
-          `${url.origin}/p?u=${encodeURIComponent(abs)}`
-        );
-      }
-    }
-
-    return new Response(out.join("\n"), {
-      headers: {
-        "Content-Type": "application/vnd.apple.mpegurl",
-        "Cache-Control": "no-store",
-        "Access-Control-Allow-Origin": "*",
-      },
-    });
-  },
-};
+fetchStreamManifest();
