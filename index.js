@@ -1,95 +1,74 @@
 const ENTRY_PLAYLIST =
-  "http://kstv.us:8080/live/carloskiu/4461542986/15965.m3u8";
-
-const DVR_SECONDS = 300; // 5 minutes
+  "https://lor.us-east-1.amazonaws.com/v1/manifest/85b2e189604a6043ef957e7a3e6ed3bf9b11c843/USCA_DAI_STRM6/117c2abf-8f3d-498e-9531-dbd5aaa0a519/1.m3u8";
 
 export default {
   async fetch(request) {
     const url = new URL(request.url);
 
-    // =========================
-    // SEGMENT PROXY
-    // =========================
-    if (url.pathname === "/seg") {
+    // ============================
+    // SEGMENT / KEY / SUBPLAYLIST PROXY
+    // ============================
+    if (url.pathname === "/p") {
       const target = url.searchParams.get("u");
       if (!target) {
-        return new Response("Missing segment URL", { status: 400 });
+        return new Response("Missing target", { status: 400 });
       }
 
-      const segRes = await fetch(target, {
+      const res = await fetch(target, {
         redirect: "follow",
-        cf: { cacheTtl: 0 },
+        cf: {
+          cacheTtl: 0,
+          // Force US edge
+          colocation: "us",
+        },
       });
 
-      return new Response(segRes.body, {
-        status: segRes.status,
-        headers: {
-          "Content-Type": "video/mp2t",
-          "Cache-Control": "no-store",
-          "Access-Control-Allow-Origin": "*",
-        },
+      const headers = new Headers(res.headers);
+      headers.set("Access-Control-Allow-Origin", "*");
+      headers.set("Cache-Control", "no-store");
+
+      return new Response(res.body, {
+        status: res.status,
+        headers,
       });
     }
 
-    // =========================
+    // ============================
     // PLAYLIST HANDLER
-    // =========================
+    // ============================
     const res = await fetch(ENTRY_PLAYLIST, {
       redirect: "follow",
-      cf: { cacheTtl: 0 },
+      cf: {
+        cacheTtl: 0,
+        colocation: "us",
+      },
     });
 
-    // 🔑 THIS IS THE KEY PART
-    const finalPlaylistURL = res.url;
-    const baseURL = finalPlaylistURL.substring(
-      0,
-      finalPlaylistURL.lastIndexOf("/") + 1
-    );
+    const finalURL = res.url;
+    const baseURL =
+      finalURL.substring(0, finalURL.lastIndexOf("/") + 1);
 
     const text = await res.text();
     const lines = text.split("\n");
 
-    let segments = [];
+    let out = [];
 
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].startsWith("#EXTINF")) {
-        const duration = parseFloat(lines[i].split(":")[1]);
-        let uri = lines[i + 1];
+    for (const line of lines) {
+      if (
+        line.startsWith("#") ||
+        line.trim() === ""
+      ) {
+        out.push(line);
+      } else {
+        // Resolve relative URLs
+        const abs = line.startsWith("http")
+          ? line
+          : baseURL + line;
 
-        // Resolve against FINAL redirected base
-        if (!uri.startsWith("http")) {
-          uri = baseURL + uri;
-        }
-
-        segments.push({ duration, inf: lines[i], uri });
+        out.push(
+          `${url.origin}/p?u=${encodeURIComponent(abs)}`
+        );
       }
-    }
-
-    // Rolling 5-minute window
-    let buffer = [];
-    let total = 0;
-
-    for (let i = segments.length - 1; i >= 0; i--) {
-      buffer.unshift(segments[i]);
-      total += segments[i].duration;
-      if (total >= DVR_SECONDS) break;
-    }
-
-    const mediaSeq = Math.max(0, segments.length - buffer.length);
-
-    let out = [
-      "#EXTM3U",
-      "#EXT-X-VERSION:3",
-      "#EXT-X-TARGETDURATION:10",
-      "#EXT-X-PLAYLIST-TYPE:EVENT",
-      "#EXT-X-MEDIA-SEQUENCE:" + mediaSeq,
-    ];
-
-    for (const s of buffer) {
-      out.push(s.inf);
-      out.push(
-        url.origin + "/seg?u=" + encodeURIComponent(s.uri)
-      );
     }
 
     return new Response(out.join("\n"), {
