@@ -1,4 +1,14 @@
 {
   "name": "hls-worker",
-  "private": true
+  "private": true,
+  "version": "1.0.0",
+  "description": "A Node.js worker to proxy HLS streams via an authenticated proxy.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.5",
+    "https-proxy-agent": "^7.0.4"
+  }
 }
