@@ -1,68 +1,89 @@
+const ORIGIN_BASE =
+  "http://kstv.us:8080/live/carloskiu/4461542986/";
+const ORIGIN_PLAYLIST = ORIGIN_BASE + "15965.m3u8";
+
+const DVR_WINDOW = 300; // 5 minutes
+
 export default {
   async fetch(request) {
-    const ORIGIN_PLAYLIST =
-      "http://kstv.us:8080/live/carloskiu/4461542986/15965.m3u8";
+    const url = new URL(request.url);
 
-    const DVR_WINDOW_SECONDS = 300; // 5 minutes
+    // -------------------------------
+    // SEGMENT PROXY
+    // -------------------------------
+    if (url.pathname.startsWith("/seg")) {
+      const target = url.searchParams.get("u");
+      if (!target) {
+        return new Response("Missing segment URL", { status: 400 });
+      }
 
-    const response = await fetch(ORIGIN_PLAYLIST, {
+      return fetch(target, {
+        headers: {
+          "User-Agent": "Mozilla/5.0",
+        },
+      });
+    }
+
+    // -------------------------------
+    // PLAYLIST HANDLER
+    // -------------------------------
+    const res = await fetch(ORIGIN_PLAYLIST, {
       headers: {
         "User-Agent": "Mozilla/5.0",
       },
     });
 
-    let playlist = await response.text();
-    const lines = playlist.split("\n");
+    const text = await res.text();
+    const lines = text.split("\n");
 
     let segments = [];
-    let currentDuration = 0;
+    let total = 0;
 
     for (let i = 0; i < lines.length; i++) {
       if (lines[i].startsWith("#EXTINF")) {
         const duration = parseFloat(lines[i].split(":")[1]);
-        const uri = lines[i + 1];
+        let uri = lines[i + 1];
 
-        segments.push({
-          duration,
-          inf: lines[i],
-          uri,
-        });
+        // Make absolute
+        if (!uri.startsWith("http")) {
+          uri = ORIGIN_BASE + uri;
+        }
 
-        currentDuration += duration;
+        segments.push({ duration, inf: lines[i], uri });
+        total += duration;
       }
     }
 
-    // Keep only last 5 minutes
-    let rolling = [];
-    let rollingDuration = 0;
+    // Keep last 5 minutes
+    let buffer = [];
+    let sum = 0;
 
     for (let i = segments.length - 1; i >= 0; i--) {
-      rolling.unshift(segments[i]);
-      rollingDuration += segments[i].duration;
-
-      if (rollingDuration >= DVR_WINDOW_SECONDS) break;
+      buffer.unshift(segments[i]);
+      sum += segments[i].duration;
+      if (sum >= DVR_WINDOW) break;
     }
 
-    // Calculate media sequence
-    const mediaSequence = segments.length - rolling.length;
+    const mediaSeq = segments.length - buffer.length;
 
-    // Build new playlist
-    let output = [
+    let out = [
       "#EXTM3U",
       "#EXT-X-VERSION:3",
       "#EXT-X-TARGETDURATION:10",
-      "#EXT-X-MEDIA-SEQUENCE:" + mediaSequence,
+      "#EXT-X-MEDIA-SEQUENCE:" + mediaSeq,
     ];
 
-    for (const seg of rolling) {
-      output.push(seg.inf);
-      output.push(seg.uri);
+    for (const s of buffer) {
+      const proxied =
+        url.origin + "/seg?u=" + encodeURIComponent(s.uri);
+      out.push(s.inf);
+      out.push(proxied);
     }
 
-    return new Response(output.join("\n"), {
+    return new Response(out.join("\n"), {
       headers: {
         "Content-Type": "application/vnd.apple.mpegurl",
-        "Cache-Control": "no-cache",
+        "Cache-Control": "no-store",
         "Access-Control-Allow-Origin": "*",
       },
     });
