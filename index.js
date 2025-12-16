@@ -1,33 +1,44 @@
 const ORIGIN_BASE =
   "http://kstv.us:8080/live/carloskiu/4461542986/";
-const ORIGIN_PLAYLIST = ORIGIN_BASE + "15965.m3u8";
+const PLAYLIST = ORIGIN_BASE + "15965.m3u8";
 
-const DVR_WINDOW = 300; // 5 minutes
+const DVR_SECONDS = 300; // 5 minutes
 
 export default {
-  async fetch(request) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // -------------------------------
+    // =========================
     // SEGMENT PROXY
-    // -------------------------------
-    if (url.pathname.startsWith("/seg")) {
+    // =========================
+    if (url.pathname === "/seg") {
       const target = url.searchParams.get("u");
       if (!target) {
         return new Response("Missing segment URL", { status: 400 });
       }
 
-      return fetch(target, {
+      const segRes = await fetch(target, {
+        cf: { cacheTtl: 0 },
         headers: {
           "User-Agent": "Mozilla/5.0",
         },
       });
+
+      return new Response(segRes.body, {
+        status: segRes.status,
+        headers: {
+          "Content-Type": "video/mp2t",
+          "Cache-Control": "no-store",
+          "Access-Control-Allow-Origin": "*",
+        },
+      });
     }
 
-    // -------------------------------
+    // =========================
     // PLAYLIST HANDLER
-    // -------------------------------
-    const res = await fetch(ORIGIN_PLAYLIST, {
+    // =========================
+    const res = await fetch(PLAYLIST, {
+      cf: { cacheTtl: 0 },
       headers: {
         "User-Agent": "Mozilla/5.0",
       },
@@ -37,47 +48,49 @@ export default {
     const lines = text.split("\n");
 
     let segments = [];
-    let total = 0;
 
     for (let i = 0; i < lines.length; i++) {
       if (lines[i].startsWith("#EXTINF")) {
         const duration = parseFloat(lines[i].split(":")[1]);
         let uri = lines[i + 1];
 
-        // Make absolute
         if (!uri.startsWith("http")) {
           uri = ORIGIN_BASE + uri;
         }
 
-        segments.push({ duration, inf: lines[i], uri });
-        total += duration;
+        segments.push({
+          duration,
+          inf: lines[i],
+          uri,
+        });
       }
     }
 
-    // Keep last 5 minutes
+    // Rolling 5-minute buffer
     let buffer = [];
-    let sum = 0;
+    let total = 0;
 
     for (let i = segments.length - 1; i >= 0; i--) {
       buffer.unshift(segments[i]);
-      sum += segments[i].duration;
-      if (sum >= DVR_WINDOW) break;
+      total += segments[i].duration;
+      if (total >= DVR_SECONDS) break;
     }
 
-    const mediaSeq = segments.length - buffer.length;
+    const mediaSeq = Math.max(0, segments.length - buffer.length);
 
     let out = [
       "#EXTM3U",
       "#EXT-X-VERSION:3",
       "#EXT-X-TARGETDURATION:10",
+      "#EXT-X-PLAYLIST-TYPE:EVENT",
       "#EXT-X-MEDIA-SEQUENCE:" + mediaSeq,
     ];
 
     for (const s of buffer) {
-      const proxied =
-        url.origin + "/seg?u=" + encodeURIComponent(s.uri);
       out.push(s.inf);
-      out.push(proxied);
+      out.push(
+        url.origin + "/seg?u=" + encodeURIComponent(s.uri)
+      );
     }
 
     return new Response(out.join("\n"), {
